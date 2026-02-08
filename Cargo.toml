@@ -12,7 +12,7 @@ resolver = "2"
 edition = "2024"
 version = "0.1.0"
 license = "MIT"
-authors = ["TabbyTerm"]
+authors = ["CtyTerm"]
 
 [workspace.dependencies]
 anyhow = "1.0"

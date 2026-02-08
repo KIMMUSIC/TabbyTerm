@@ -29,10 +29,10 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
-          $packageDir = "dist/TabbyTerm-$tag-windows-x64"
+          $packageDir = "dist/CtyTerm-$tag-windows-x64"
           New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
 
-          Copy-Item "target/release/app.exe" "$packageDir/TabbyTerm.exe" -Force
+          Copy-Item "target/release/app.exe" "$packageDir/CtyTerm.exe" -Force
 
           if (Test-Path "assets") {
             Copy-Item "assets" "$packageDir/assets" -Recurse -Force
@@ -41,16 +41,16 @@ jobs:
             Copy-Item "config" "$packageDir/config" -Recurse -Force
           }
 
-          Compress-Archive -Path "$packageDir/*" -DestinationPath "TabbyTerm-$tag-windows-x64.zip" -Force
+          Compress-Archive -Path "$packageDir/*" -DestinationPath "CtyTerm-$tag-windows-x64.zip" -Force
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tabbyterm-windows-x64
-          path: TabbyTerm-*-windows-x64.zip
+          name: ctyterm-windows-x64
+          path: CtyTerm-*-windows-x64.zip
 
       - name: Publish GitHub Release asset
         uses: softprops/action-gh-release@v2
         with:
-          files: TabbyTerm-*-windows-x64.zip
+          files: CtyTerm-*-windows-x64.zip
           generate_release_notes: true

@@ -1,7 +1,14 @@
-# TabbyTerm
+# CtyTerm
 
 Windows 전용 Rust/egui/wgpu 기반 터미널입니다.  
 현재 버전은 블록 기반 출력, 탭/Pane, AI 패널, 커스텀 상단바, 애니메이션 마스코트를 포함합니다.
+
+## 다운로드 (exe)
+
+최신 Windows 실행 파일(zip)은 GitHub Releases에서 받으면 됩니다.
+
+- Latest: https://github.com/KIMMUSIC/CtyTerm/releases/latest
+- Asset 이름: `CtyTerm-<tag>-windows-x64.zip`
 
 ## 실행
 
@@ -45,7 +52,8 @@ cargo run -p app
 6. `Ctrl+W`: 활성 탭 닫기
 7. `ArrowUp`/`ArrowDown`: 명령 히스토리 이동
 8. `Enter`: 명령 실행
-9. `Esc`: Command Palette 닫기
+9. `Shift+Enter`: 줄바꿈
+10. `Esc`: Command Palette 닫기
 
 ## 메뉴 기능
 

@@ -466,7 +466,7 @@ pub fn run() -> Result<()> {
     };
 
     eframe::run_native(
-        "TabbyTerm",
+        "CtyTerm",
         native_options,
         Box::new(|_cc| {
             let app = TerminalApp::new()?;
@@ -1294,14 +1294,15 @@ impl TerminalApp {
             }
 
             let command = std::mem::take(&mut runtime.input_buffer);
-            let command = command.trim_end().to_owned();
+            let command = normalize_multiline_powershell_command(command.trim_end());
+            let command_for_shell = normalize_windows_shell_newlines(&command);
             let cwd = std::env::current_dir()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| ".".to_owned());
 
             runtime.session.start_command_block(command.clone(), cwd);
             runtime.input_history_cursor = None;
-            runtime.pty.write_input(&format!("{command}\r\n"))
+            runtime.pty.write_input(&format!("{command_for_shell}\r\n"))
         };
 
         if let Err(err) = write_result {
@@ -2485,8 +2486,18 @@ impl eframe::App for TerminalApp {
                 });
             });
 
+        let input_bar_height = if self.active_tab_kind() == AppTabKind::Editor {
+            48.0
+        } else {
+            let input_rows = self
+                .active_runtime()
+                .map(|runtime| runtime.input_buffer.lines().count().max(1).min(4))
+                .unwrap_or(1);
+            48.0 + (input_rows.saturating_sub(1) as f32) * 18.0
+        };
+
         egui::TopBottomPanel::bottom("input_bar")
-            .exact_height(48.0)
+            .exact_height(input_bar_height)
             .frame(
                 egui::Frame::new()
                     .fill(theme::BG_SURFACE_0)
@@ -2542,18 +2553,23 @@ impl eframe::App for TerminalApp {
                         let mut request_history_down = false;
                         let mut request_submit = false;
                         let active_tab_id = self.tabs.active_id();
+                        let request_focus_input = self.focus_terminal_input_next_frame;
+                        let mut consumed_focus_request = false;
 
                         if let Some(runtime) = self.active_runtime_mut() {
+                            let input_rows = runtime.input_buffer.lines().count().max(1).min(4);
                             let input_width = (ui.available_width() - 92.0).max(120.0);
+                            let input_height = 30.0 + (input_rows.saturating_sub(1) as f32) * 18.0;
                             let response = ui.add_sized(
-                                [input_width, 30.0],
-                                egui::TextEdit::singleline(&mut runtime.input_buffer)
+                                [input_width, input_height],
+                                egui::TextEdit::multiline(&mut runtime.input_buffer)
+                                    .desired_rows(1)
                                     .id_salt(egui::Id::new("terminal-input").with(active_tab_id))
-                                    .hint_text("type command and press Enter"),
+                                    .hint_text("Enter: run | Shift+Enter: newline"),
                             );
-                            if self.focus_terminal_input_next_frame {
+                            if request_focus_input {
                                 response.request_focus();
-                                self.focus_terminal_input_next_frame = false;
+                                consumed_focus_request = true;
                             }
 
                             let run_clicked = ui
@@ -2568,21 +2584,29 @@ impl eframe::App for TerminalApp {
                                 )
                                 .clicked();
 
+                            let is_single_line_input = !runtime.input_buffer.contains('\n');
+
                             if response.has_focus()
+                                && is_single_line_input
                                 && ui.input(|i| i.key_pressed(egui::Key::ArrowUp))
                             {
                                 request_history_up = true;
                             }
 
                             if response.has_focus()
+                                && is_single_line_input
                                 && ui.input(|i| i.key_pressed(egui::Key::ArrowDown))
                             {
                                 request_history_down = true;
                             }
 
-                            let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            let (enter_pressed, shift_pressed) =
+                                ui.input(|i| (i.key_pressed(egui::Key::Enter), i.modifiers.shift));
                             let submit_by_enter =
-                                enter_pressed && (response.has_focus() || response.lost_focus());
+                                response.has_focus() && enter_pressed && !shift_pressed;
+                            if submit_by_enter {
+                                trim_single_trailing_newline(&mut runtime.input_buffer);
+                            }
                             request_submit = run_clicked || submit_by_enter;
                         } else {
                             ui.label(
@@ -2590,6 +2614,9 @@ impl eframe::App for TerminalApp {
                                     .monospace()
                                     .color(theme::TEXT_MUTED),
                             );
+                        }
+                        if consumed_focus_request {
+                            self.focus_terminal_input_next_frame = false;
                         }
 
                         if request_history_up {
@@ -3956,6 +3983,56 @@ fn sanitize_shell_output_lines(lines: Vec<String>, command: &str) -> Vec<String>
         .collect()
 }
 
+fn trim_single_trailing_newline(input: &mut String) {
+    if input.ends_with('\n') {
+        input.pop();
+        if input.ends_with('\r') {
+            input.pop();
+        }
+    }
+}
+
+fn normalize_multiline_powershell_command(command: &str) -> String {
+    if !command.contains('\n') {
+        return command.to_owned();
+    }
+
+    let mut normalized: Vec<String> = Vec::new();
+    for raw_line in command.lines() {
+        let line = raw_line.trim_end_matches('\r');
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let leading_trimmed = line.trim_start();
+        if let Some(rest) = leading_trimmed.strip_prefix('|') {
+            if let Some(previous) = normalized.last_mut() {
+                if !previous.trim_end().ends_with('|') {
+                    previous.push_str(" |");
+                }
+                let tail = rest.trim_start();
+                if !tail.is_empty() {
+                    normalized.push(tail.to_owned());
+                }
+                continue;
+            }
+        }
+
+        normalized.push(line.to_owned());
+    }
+
+    if normalized.is_empty() {
+        command.to_owned()
+    } else {
+        normalized.join("\n")
+    }
+}
+
+fn normalize_windows_shell_newlines(command: &str) -> String {
+    command.replace("\r\n", "\n").replace('\n', "\r\n")
+}
+
 fn sanitize_shell_output_line(line: &str, command: &str) -> Option<String> {
     let line = line.trim_end_matches('\0').trim_end();
     let line = strip_trailing_powershell_prompt(line);
@@ -4113,9 +4190,11 @@ mod tests {
         build_ai_block_copy_text, build_ai_launch_attempts, build_command_block_copy_text,
         build_editor_open_command, build_tab_scoped_claude_session_id,
         ensure_claude_tab_scoped_session_args, ensure_codex_tab_scoped_resume_args,
-        extract_codex_session_id, load_workspace_snapshot_from_disk, parse_first_file_line_ref,
-        prepare_ai_prompt_transport, sanitize_pending_shell_line, sanitize_shell_output_lines,
-        save_workspace_snapshot_to_disk, should_emit_ai_stderr_line, should_hide_pending_line,
+        extract_codex_session_id, load_workspace_snapshot_from_disk,
+        normalize_multiline_powershell_command, normalize_windows_shell_newlines,
+        parse_first_file_line_ref, prepare_ai_prompt_transport, sanitize_pending_shell_line,
+        sanitize_shell_output_lines, save_workspace_snapshot_to_disk, should_emit_ai_stderr_line,
+        should_hide_pending_line, trim_single_trailing_newline,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -4337,6 +4416,46 @@ mod tests {
     }
 
     #[test]
+    fn trailing_newline_is_trimmed_once_for_submit() {
+        let mut value = "echo hi\nline2\n".to_owned();
+        trim_single_trailing_newline(&mut value);
+        assert_eq!(value, "echo hi\nline2");
+
+        trim_single_trailing_newline(&mut value);
+        assert_eq!(value, "echo hi\nline2");
+    }
+
+    #[test]
+    fn multiline_command_normalizer_rewrites_leading_pipe_lines() {
+        let input =
+            "Get-ChildItem\n| Where-Object { $_.Length -gt 1KB }\n\n| Select-Object Name, Length";
+        let normalized = normalize_multiline_powershell_command(input);
+        assert_eq!(
+            normalized,
+            "Get-ChildItem |\nWhere-Object { $_.Length -gt 1KB } |\nSelect-Object Name, Length"
+        );
+    }
+
+    #[test]
+    fn multiline_command_normalizer_keeps_regular_lines() {
+        let input = "git status\ngit add .\ngit commit -m \"x\"";
+        let normalized = normalize_multiline_powershell_command(input);
+        assert_eq!(normalized, input);
+    }
+
+    #[test]
+    fn windows_shell_newline_normalizer_uses_crlf() {
+        assert_eq!(
+            normalize_windows_shell_newlines("a\nb\nc"),
+            "a\r\nb\r\nc".to_owned()
+        );
+        assert_eq!(
+            normalize_windows_shell_newlines("a\r\nb\r\nc"),
+            "a\r\nb\r\nc".to_owned()
+        );
+    }
+
+    #[test]
     fn codex_args_get_tab_scoped_resume_session_id() {
         let args = vec!["exec".to_owned(), "-".to_owned()];
         let updated = ensure_codex_tab_scoped_resume_args("codex", &args, Some("sess_abc"));
@@ -4386,7 +4505,7 @@ mod tests {
     #[test]
     fn claude_args_get_tab_scoped_session_id() {
         let args = vec!["--continue".to_owned(), "--print".to_owned()];
-        let workspace = PathBuf::from("D:\\TabbyTerm");
+        let workspace = PathBuf::from("D:\\CtyTerm");
         let updated = ensure_claude_tab_scoped_session_args("claude", &args, 42, &workspace);
         assert_eq!(updated[0], "--session-id");
         assert_eq!(updated[2], "--continue");
@@ -4404,14 +4523,14 @@ mod tests {
     #[test]
     fn claude_explicit_resume_is_not_overridden() {
         let args = vec!["--resume".to_owned(), "--print".to_owned()];
-        let workspace = PathBuf::from("D:\\TabbyTerm");
+        let workspace = PathBuf::from("D:\\CtyTerm");
         let updated = ensure_claude_tab_scoped_session_args("claude", &args, 3, &workspace);
         assert_eq!(updated, args);
     }
 
     #[test]
     fn tab_scoped_session_id_is_stable_and_unique_per_tab() {
-        let workspace = PathBuf::from("D:\\TabbyTerm");
+        let workspace = PathBuf::from("D:\\CtyTerm");
         let a = build_tab_scoped_claude_session_id(1, &workspace);
         let b = build_tab_scoped_claude_session_id(1, &workspace);
         let c = build_tab_scoped_claude_session_id(2, &workspace);
