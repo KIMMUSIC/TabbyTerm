@@ -10,6 +10,7 @@ enum ParseState {
 pub struct MinimalVtParser {
     state: ParseState,
     current_line: String,
+    pending_utf8: Vec<u8>,
     saw_cr: bool,
 }
 
@@ -18,6 +19,7 @@ impl Default for MinimalVtParser {
         Self {
             state: ParseState::Ground,
             current_line: String::new(),
+            pending_utf8: Vec::new(),
             saw_cr: false,
         }
     }
@@ -30,19 +32,26 @@ impl MinimalVtParser {
         for &byte in chunk {
             match self.state {
                 ParseState::Ground => match byte {
-                    0x1B => self.state = ParseState::Escape,
+                    0x1B => {
+                        self.flush_pending_utf8();
+                        self.state = ParseState::Escape;
+                    }
                     b'\r' => {
+                        self.flush_pending_utf8();
                         self.saw_cr = true;
                     }
                     b'\n' => {
+                        self.flush_pending_utf8();
                         self.saw_cr = false;
                         completed.push(std::mem::take(&mut self.current_line));
                     }
                     0x08 => {
+                        self.flush_pending_utf8();
                         self.saw_cr = false;
                         self.current_line.pop();
                     }
                     b'\t' => {
+                        self.flush_pending_utf8();
                         if self.saw_cr {
                             self.current_line.clear();
                             self.saw_cr = false;
@@ -50,14 +59,15 @@ impl MinimalVtParser {
                         self.saw_cr = false;
                         self.current_line.push_str("    ");
                     }
-                    b if b.is_ascii() && !b.is_ascii_control() => {
+                    b if !b.is_ascii_control() => {
                         if self.saw_cr {
                             // CR without LF means cursor returned to column 0.
                             // Approximate this by replacing the current line content.
                             self.current_line.clear();
                         }
                         self.saw_cr = false;
-                        self.current_line.push(b as char);
+                        self.pending_utf8.push(b);
+                        self.flush_pending_utf8();
                     }
                     _ => {}
                 },
@@ -83,11 +93,42 @@ impl MinimalVtParser {
             }
         }
 
+        self.flush_pending_utf8();
         completed
     }
 
     pub fn current_line(&self) -> &str {
         &self.current_line
+    }
+
+    fn flush_pending_utf8(&mut self) {
+        while !self.pending_utf8.is_empty() {
+            match std::str::from_utf8(&self.pending_utf8) {
+                Ok(text) => {
+                    self.current_line.push_str(text);
+                    self.pending_utf8.clear();
+                    break;
+                }
+                Err(err) => {
+                    let valid_up_to = err.valid_up_to();
+                    if valid_up_to > 0 {
+                        let valid = std::str::from_utf8(&self.pending_utf8[..valid_up_to])
+                            .expect("valid prefix must decode");
+                        self.current_line.push_str(valid);
+                        self.pending_utf8.drain(..valid_up_to);
+                        continue;
+                    }
+
+                    match err.error_len() {
+                        Some(error_len) => {
+                            self.current_line.push('\u{FFFD}');
+                            self.pending_utf8.drain(..error_len);
+                        }
+                        None => break,
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -114,5 +155,22 @@ mod tests {
         let mut parser = MinimalVtParser::default();
         let lines = parser.feed(b"first\rsecond\n");
         assert_eq!(lines, vec!["second"]);
+    }
+
+    #[test]
+    fn parses_utf8_text() {
+        let mut parser = MinimalVtParser::default();
+        let lines = parser.feed("한글 출력\n".as_bytes());
+        assert_eq!(lines, vec!["한글 출력"]);
+    }
+
+    #[test]
+    fn keeps_utf8_sequences_split_across_chunks() {
+        let mut parser = MinimalVtParser::default();
+        let text = "가\n".as_bytes();
+        let lines = parser.feed(&text[..1]);
+        assert!(lines.is_empty());
+        let lines = parser.feed(&text[1..]);
+        assert_eq!(lines, vec!["가"]);
     }
 }

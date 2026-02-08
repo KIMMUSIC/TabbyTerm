@@ -490,6 +490,7 @@ pub struct TerminalApp {
     ai_panel_visible: bool,
     prompt_mascot_frames: Vec<egui::TextureHandle>,
     prompt_mascot_load_attempted: bool,
+    focus_terminal_input_next_frame: bool,
     status_text: String,
     ai_event_tx: Sender<AiRunEvent>,
     ai_event_rx: Receiver<AiRunEvent>,
@@ -537,6 +538,7 @@ impl TerminalApp {
             ai_panel_visible: true,
             prompt_mascot_frames: Vec::new(),
             prompt_mascot_load_attempted: false,
+            focus_terminal_input_next_frame: false,
             status_text: format!(
                 "PTY attached (pid={pid}) | {config_note} | auto-restore off (use restore session)"
             ),
@@ -1122,11 +1124,13 @@ impl TerminalApp {
                 let lines = sanitize_shell_output_lines(lines, command);
                 runtime.session.push_output_lines(lines);
 
-                let pending = runtime.parser.current_line().to_owned();
-                if should_hide_pending_line(&pending) {
+                let pending = runtime.parser.current_line();
+                if should_hide_pending_line(pending) {
                     runtime.session.set_pending_line(String::new());
-                } else {
+                } else if let Some(pending) = sanitize_pending_shell_line(pending) {
                     runtime.session.set_pending_line(pending);
+                } else {
+                    runtime.session.set_pending_line(String::new());
                 }
             }
         }
@@ -2519,14 +2523,20 @@ impl eframe::App for TerminalApp {
                         let mut request_history_up = false;
                         let mut request_history_down = false;
                         let mut request_submit = false;
+                        let active_tab_id = self.tabs.active_id();
 
                         if let Some(runtime) = self.active_runtime_mut() {
                             let input_width = (ui.available_width() - 92.0).max(120.0);
                             let response = ui.add_sized(
                                 [input_width, 30.0],
                                 egui::TextEdit::singleline(&mut runtime.input_buffer)
+                                    .id_salt(egui::Id::new("terminal-input").with(active_tab_id))
                                     .hint_text("type command and press Enter"),
                             );
+                            if self.focus_terminal_input_next_frame {
+                                response.request_focus();
+                                self.focus_terminal_input_next_frame = false;
+                            }
 
                             let run_clicked = ui
                                 .add_sized(
@@ -2572,6 +2582,7 @@ impl eframe::App for TerminalApp {
                         }
                         if request_submit {
                             self.submit_input();
+                            self.focus_terminal_input_next_frame = true;
                         }
                     });
                 }
@@ -3850,6 +3861,7 @@ fn sanitize_shell_output_lines(lines: Vec<String>, command: &str) -> Vec<String>
 
 fn sanitize_shell_output_line(line: &str, command: &str) -> Option<String> {
     let line = line.trim_end_matches('\0').trim_end();
+    let line = strip_trailing_powershell_prompt(line);
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return None;
@@ -3887,25 +3899,80 @@ fn sanitize_shell_output_line(line: &str, command: &str) -> Option<String> {
     Some(line.to_owned())
 }
 
-fn should_hide_pending_line(line: &str) -> bool {
+fn sanitize_pending_shell_line(line: &str) -> Option<String> {
+    let line = line.trim_end_matches('\0').trim_end();
+    let line = strip_trailing_powershell_prompt(line);
     let trimmed = line.trim();
     if trimmed.is_empty() {
-        return true;
+        return None;
     }
     if extract_powershell_prompt_tail(trimmed).is_some() {
-        return true;
+        return None;
     }
-    is_continuation_prompt(trimmed)
+    if is_continuation_prompt(trimmed) {
+        return None;
+    }
+    Some(line.to_owned())
+}
+
+fn should_hide_pending_line(line: &str) -> bool {
+    sanitize_pending_shell_line(line).is_none()
 }
 
 fn extract_powershell_prompt_tail(line: &str) -> Option<&str> {
     let trimmed = line.trim_start();
-    if !trimmed.starts_with("PS ") {
+    let bytes = trimmed.as_bytes();
+    if bytes.len() < 3 {
         return None;
     }
 
-    let idx = trimmed.find('>')?;
-    Some(trimmed[idx + 1..].trim_start())
+    if bytes[0].to_ascii_lowercase() != b'p'
+        || bytes[1].to_ascii_lowercase() != b's'
+        || bytes[2] != b' '
+    {
+        return None;
+    }
+
+    let rest = &trimmed[3..];
+    let idx = rest.find('>')?;
+    Some(rest[idx + 1..].trim_start())
+}
+
+fn strip_trailing_powershell_prompt(line: &str) -> &str {
+    let trimmed = line.trim_end();
+    let bytes = trimmed.as_bytes();
+    if bytes.len() < 3 {
+        return trimmed;
+    }
+
+    for start in (0..=bytes.len() - 3).rev() {
+        if bytes[start].to_ascii_lowercase() != b'p'
+            || bytes[start + 1].to_ascii_lowercase() != b's'
+            || bytes[start + 2] != b' '
+        {
+            continue;
+        }
+
+        let candidate = &trimmed[start..];
+        let rest = &candidate[3..];
+        let Some(idx) = rest.find('>') else {
+            continue;
+        };
+
+        let prompt_path = rest[..idx].trim_end();
+        if !(looks_like_windows_path(prompt_path) || prompt_path == "~") {
+            continue;
+        }
+
+        let tail = rest[idx + 1..].trim_start();
+        if !tail.is_empty() {
+            continue;
+        }
+
+        return trimmed[..start].trim_end();
+    }
+
+    trimmed
 }
 
 fn is_continuation_prompt(line: &str) -> bool {
@@ -3949,8 +4016,9 @@ mod tests {
         build_ai_block_copy_text, build_ai_launch_attempts, build_command_block_copy_text,
         build_editor_open_command, build_tab_scoped_claude_session_id,
         ensure_claude_tab_scoped_session_args, load_workspace_snapshot_from_disk,
-        parse_first_file_line_ref, prepare_ai_prompt_transport, sanitize_shell_output_lines,
-        save_workspace_snapshot_to_disk, should_emit_ai_stderr_line, should_hide_pending_line,
+        parse_first_file_line_ref, prepare_ai_prompt_transport, sanitize_pending_shell_line,
+        sanitize_shell_output_lines, save_workspace_snapshot_to_disk, should_emit_ai_stderr_line,
+        should_hide_pending_line,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -4091,10 +4159,27 @@ mod tests {
     }
 
     #[test]
+    fn shell_sanitizer_strips_trailing_prompt_suffix() {
+        let lines = vec!["build completePS D:\\MyTerminal-c>".to_owned()];
+        let cleaned = sanitize_shell_output_lines(lines, "cargo build");
+        assert_eq!(cleaned, vec!["build complete".to_owned()]);
+    }
+
+    #[test]
     fn pending_prompt_line_is_hidden() {
         assert!(should_hide_pending_line("PS C:\\Users\\ldgyu>"));
+        assert!(should_hide_pending_line("PS D:\\MyTerminal-c>"));
         assert!(should_hide_pending_line(">> "));
         assert!(!should_hide_pending_line("building project..."));
+    }
+
+    #[test]
+    fn pending_line_sanitizer_strips_prompt_suffix() {
+        assert_eq!(
+            sanitize_pending_shell_line("build completePS D:\\MyTerminal-c>"),
+            Some("build complete".to_owned())
+        );
+        assert_eq!(sanitize_pending_shell_line("PS D:\\MyTerminal-c>"), None);
     }
 
     #[test]

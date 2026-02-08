@@ -29,6 +29,13 @@ impl PtySession {
         let mut cmd = CommandBuilder::new("powershell.exe");
         cmd.arg("-NoLogo");
         cmd.arg("-NoExit");
+        cmd.arg("-Command");
+        cmd.arg(
+            "$OutputEncoding=[System.Text.Encoding]::UTF8; \
+[Console]::InputEncoding=[System.Text.Encoding]::UTF8; \
+[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; \
+chcp.com 65001 > $null",
+        );
         if let Ok(cwd) = std::env::current_dir() {
             cmd.cwd(cwd);
         }
@@ -168,5 +175,30 @@ mod tests {
 
         let output = String::from_utf8_lossy(&combined).to_string();
         panic!("did not receive expected marker from powershell PTY; output={output}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_pty_roundtrip_emits_korean_output() {
+        let session = PtySession::spawn_powershell(120, 40).expect("pty spawn should succeed");
+        session
+            .write_input("$text='한글테스트'; Write-Output $text\r\n")
+            .expect("pty write should succeed");
+
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let mut combined = Vec::new();
+        while Instant::now() < deadline {
+            if let Some(chunk) = session.try_read_chunk() {
+                combined.extend(chunk);
+                if String::from_utf8_lossy(&combined).contains("한글테스트") {
+                    return;
+                }
+            } else {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        let output = String::from_utf8_lossy(&combined).to_string();
+        panic!("did not receive expected korean text from powershell PTY; output={output}");
     }
 }

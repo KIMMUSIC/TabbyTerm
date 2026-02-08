@@ -1,8 +1,11 @@
 use eframe::egui;
+use std::fs;
 
 const NERD_FONT_NAME: &str = "symbols-nerd-font-mono";
 const NERD_FONT_SYMBOLS_ONLY: &[u8] =
     include_bytes!("../../../../assets/fonts/SymbolsNerdFontMono-Regular.ttf");
+const KOREAN_FALLBACK_FONT_NAME: &str = "windows-malgun-gothic";
+const KOREAN_FALLBACK_FONT_PATHS: &[&str] = &["C:\\Windows\\Fonts\\malgun.ttf"];
 
 pub const BG_APP: egui::Color32 = egui::Color32::from_rgb(30, 30, 30);
 pub const BG_SURFACE_0: egui::Color32 = egui::Color32::from_rgb(37, 37, 38);
@@ -93,16 +96,37 @@ fn apply_fonts(ctx: &egui::Context) {
         NERD_FONT_NAME.to_owned(),
         egui::FontData::from_static(NERD_FONT_SYMBOLS_ONLY).into(),
     );
+    if let Some(korean_font) = load_first_font_bytes(KOREAN_FALLBACK_FONT_PATHS) {
+        fonts.font_data.insert(
+            KOREAN_FALLBACK_FONT_NAME.to_owned(),
+            egui::FontData::from_owned(korean_font).into(),
+        );
+    }
 
     if let Some(mono_family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
         mono_family.insert(0, NERD_FONT_NAME.to_owned());
+        if fonts.font_data.contains_key(KOREAN_FALLBACK_FONT_NAME) {
+            mono_family.push(KOREAN_FALLBACK_FONT_NAME.to_owned());
+        }
     }
 
     if let Some(prop_family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
         prop_family.insert(0, NERD_FONT_NAME.to_owned());
+        if fonts.font_data.contains_key(KOREAN_FALLBACK_FONT_NAME) {
+            prop_family.push(KOREAN_FALLBACK_FONT_NAME.to_owned());
+        }
     }
 
     ctx.set_fonts(fonts);
+}
+
+fn load_first_font_bytes(paths: &[&str]) -> Option<Vec<u8>> {
+    for path in paths {
+        if let Ok(bytes) = fs::read(path) {
+            return Some(bytes);
+        }
+    }
+    None
 }
 
 pub fn panel_frame() -> egui::Frame {
