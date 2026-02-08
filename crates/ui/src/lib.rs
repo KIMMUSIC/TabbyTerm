@@ -671,23 +671,9 @@ impl TerminalApp {
         }
     }
 
-    fn prompt_mascot_candidate_dirs() -> Vec<PathBuf> {
-        let mut dirs = Vec::new();
-        if let Ok(profile) = std::env::var("USERPROFILE") {
-            let root = PathBuf::from(profile)
-                .join("Downloads")
-                .join("resources")
-                .join("resources");
-            dirs.push(root.join("gaming-cat"));
-            dirs.push(root.join("party-parrot"));
-        }
-        dirs.push(PathBuf::from(
-            r"C:\Users\ldgyu\Downloads\resources\resources\gaming-cat",
-        ));
-        dirs.push(PathBuf::from(
-            r"C:\Users\ldgyu\Downloads\resources\resources\party-parrot",
-        ));
-        dirs
+    fn prompt_mascot_candidate_dirs(&self) -> Vec<PathBuf> {
+        let root = self.workspace_root.join("assets").join("mascot");
+        vec![root.join("gaming-cat"), root.join("party-parrot")]
     }
 
     fn parse_frame_index(path: &Path) -> u32 {
@@ -759,7 +745,7 @@ impl TerminalApp {
         }
         self.prompt_mascot_load_attempted = true;
 
-        for dir in Self::prompt_mascot_candidate_dirs() {
+        for dir in self.prompt_mascot_candidate_dirs() {
             if !dir.exists() {
                 continue;
             }

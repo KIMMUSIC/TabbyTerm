@@ -92,8 +92,8 @@ cargo run -p app
 
 앱은 아래 경로에서 PNG 프레임을 자동 로드해 입력바 마스코트를 애니메이션으로 표시합니다.
 
-1. `C:\Users\<USER>\Downloads\resources\resources\gaming-cat`
-2. `C:\Users\<USER>\Downloads\resources\resources\party-parrot`
+1. `assets/mascot/gaming-cat`
+2. `assets/mascot/party-parrot`
 
 조건:
 
